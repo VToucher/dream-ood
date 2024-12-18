@@ -1,4 +1,4 @@
-name: ldm
+name: dreamood
 channels:
   - pytorch
   - defaults
