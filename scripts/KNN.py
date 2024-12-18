@@ -65,21 +65,35 @@ def KNN_dis_search_distance(target, index, K=50, num_points=10, length=2000,dept
 def generate_outliers(ID, input_index, negative_samples, ID_points_num=2,
                       K=20, select=1, cov_mat=0.1, sampling_ratio=1.0,
                       pic_nums=30, depth=342, shift=0):
+    # 1. num of negativce samples
     length = negative_samples.shape[0]
+    
+    # 2. norm ID data
     data_norm = torch.norm(ID, p=2, dim=1, keepdim=True)
     normed_data = ID / data_norm
-    rand_ind = np.random.choice(normed_data.shape[0], int(normed_data.shape[0] * sampling_ratio), replace=False)
+    
+    # 3. init KNN index
     index = input_index
+    
+    # 4. random pick ID sample, add to index
+    rand_ind = np.random.choice(normed_data.shape[0], int(normed_data.shape[0] * sampling_ratio), replace=False)
     index.add(normed_data[rand_ind])
+    
+    # 5. KNN search, get 200(select) boundary ID sample
     minD_idx, k_th = KNN_dis_search_decrease(ID, index, K, select, shift=shift)
     boundary_data = ID[minD_idx]
     # breakpoint()
+    
+    # 6. random pick 50(pic_nums) boundary_idx
     minD_idx = minD_idx[np.random.choice(select, int(pic_nums), replace=False)]
-    data_point_list = torch.cat([ID[i:i+1].repeat(length,1) for i in minD_idx])
-    negative_sample_cov = cov_mat * negative_samples.cuda().repeat(pic_nums,1)
+    import pdb; pdb.set_trace()
+    
+    # 7. pick OOD sample by boundary ID sample
+    data_point_list = torch.cat([ID[i:i+1].repeat(length,1) for i in minD_idx])  # [1500*50, 768]
+    negative_sample_cov = cov_mat * negative_samples.cuda().repeat(pic_nums,1)  # [1500, 768].repeat(50,1) -> [1500*50, 768]
     negative_sample_list = F.normalize(negative_sample_cov + data_point_list, p=2, dim=1)
     # breakpoint()
-    point = KNN_dis_search_distance(negative_sample_list, index, K, ID_points_num, length,depth, shift=shift)
+    point = KNN_dis_search_distance(negative_sample_list, index, K, ID_points_num, length, depth, shift=shift)
 
     index.reset()
 

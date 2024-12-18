@@ -247,7 +247,7 @@ for epoch in range(0, args.epochs):
 
 # save ID features.
 number_dict = {}
-for i in range(num_classes):
+for i in range(num_classes):  # 100
     number_dict[i] = 0
 net.eval()
 data_dict = torch.zeros(num_classes, 1000, 768).cuda()
@@ -261,9 +261,9 @@ with torch.no_grad():
         # forward
         feat = net(data)
         target_numpy = target.cpu().data.numpy()
-        for index in range(len(target)):
-            dict_key = target_numpy[index]
-            if number_dict[dict_key] < 1000:
+        for index in range(len(target)):  # batch=160 (defalut)
+            dict_key = target_numpy[index]  # class idx
+            if number_dict[dict_key] < 1000:  # num idx (total=1000)
                 data_dict[dict_key][number_dict[dict_key]] = feat[index].detach()
                 number_dict[dict_key] += 1
 

@@ -1,3 +1,7 @@
+'''
+python scripts/generate_in100.py --source_folder /root/datasets/imagenet/imagenet1k_train --target_folder /root/datasets/ood/imagenet-benchmark/imagenet-100/train
+python scripts/generate_in100.py --source_folder /root/datasets/imagenet/imagenet1k_val --target_folder /root/datasets/ood/imagenet-benchmark/imagenet-100/val
+'''
 import os
 import shutil
 import argparse

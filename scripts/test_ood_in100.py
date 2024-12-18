@@ -1,6 +1,7 @@
 import numpy as np
 import sys
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '7'
 import pickle
 import argparse
 import torch
@@ -10,15 +11,17 @@ import torch.backends.cudnn as cudnn
 import torchvision.transforms as trn
 import torchvision.datasets as dset
 import torch.nn.functional as F
+from torch.autograd import Variable
 from resnet import ResNet_Model
 from PIL import Image as PILImage
+from collections import OrderedDict
 
-
-# sys.path.append(path.dirname(path.dirname(path.abspath(__file__))))
 from utils.display_results import show_performance, get_measures, print_measures, print_measures_with_std
 import utils.svhn_loader as svhn
 import utils.lsun_loader as lsun_loader
 import utils.score_calculation as lib
+cudnn.benchmark = True  # fire on all cylinders
+
 
 parser = argparse.ArgumentParser(description='Evaluates a CIFAR OOD Detector',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -32,7 +35,7 @@ parser.add_argument('--method_name', '-m', type=str, default='in100_allconv_base
 parser.add_argument('--layers', default=40, type=int, help='total number of layers')
 parser.add_argument('--widen-factor', default=2, type=int, help='widen factor')
 parser.add_argument('--droprate', default=0.3, type=float, help='dropout probability')
-parser.add_argument('--load', '-l', type=str, default='./snapshots', help='Checkpoint path to resume / test.')
+parser.add_argument('--load', '-l', type=str, default='./checkpoints/in100_ood_det_final.pt', help='Checkpoint path to resume / test.')
 parser.add_argument('--ngpu', type=int, default=1, help='0 = CPU.')
 parser.add_argument('--prefetch', type=int, default=2, help='Pre-fetching threads.')
 # EG and benchmark details
@@ -45,51 +48,28 @@ print(args)
 # torch.manual_seed(1)
 # np.random.seed(1)
 
-# mean and standard deviation of channels of CIFAR-10 images
-mean = [x / 255 for x in [125.3, 123.0, 113.9]]
-std = [x / 255 for x in [63.0, 62.1, 66.7]]
-
-test_transform = trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)])
-
-
-normalize = trn.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-test_data = \
-    torchvision.datasets.ImageFolder(
-    os.path.join('/nobackup-slow/dataset/my_xfdu/IN100_new/', 'val'),
-    trn.Compose([
-        trn.Resize(256),
-        trn.CenterCrop(224),
-        trn.ToTensor(),
-        normalize,
-    ]))
+# basic functions
+concat = lambda x: np.concatenate(x, axis=0)
+to_np = lambda x: x.data.cpu().numpy()
+auroc_list, aupr_list, fpr_list = [], [], []
 
 
+# -------------------------- 1. load pretrain detector model -------------------------- #
 num_classes = 100
-
-test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.test_bs, shuffle=False,
-                                          num_workers=args.prefetch, pin_memory=True)
-
-
 net = ResNet_Model(name='resnet34', num_classes=num_classes)
-
 start_epoch = 0
 
-from collections import OrderedDict
 def remove_data_parallel(old_state_dict):
     new_state_dict = OrderedDict()
-
     for k, v in old_state_dict.items():
         name = k[7:]  # remove `module.`
         new_state_dict[name] = v
-
     return new_state_dict
 
 # Restore model
 if args.load != '':
     for i in range(1000 - 1, -1, -1):
         subdir = 'energy_ft_sd'
-
         model_name = args.load
         if os.path.isfile(model_name):
             net.load_state_dict(remove_data_parallel(torch.load(model_name)))
@@ -102,28 +82,34 @@ if args.load != '':
 
 net.eval()
 
-
-
-
 if args.ngpu > 1:
     net = torch.nn.DataParallel(net, device_ids=list(range(args.ngpu)))
-
 if args.ngpu > 0:
     net.cuda()
     # torch.cuda.manual_seed(1)
 
-cudnn.benchmark = True  # fire on all cylinders
 
-# /////////////// Detection Prelims ///////////////
+# ----------------------- 2. load imagenet-100 val set ----------------------- #
+test_data = \
+    torchvision.datasets.ImageFolder(
+    os.path.join('/root/datasets/ood/imagenet-benchmark/imagenet-100', 'val'),
+    trn.Compose([
+        trn.Resize(256),
+        trn.CenterCrop(224),
+        trn.ToTensor(),
+        trn.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]),
+    ]))
 
-ood_num_examples = len(test_data) // 5
-expected_ap = ood_num_examples / (ood_num_examples + len(test_data))
+test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.test_bs, shuffle=False,
+                                          num_workers=args.prefetch, pin_memory=True)
 
-concat = lambda x: np.concatenate(x, axis=0)
-to_np = lambda x: x.data.cpu().numpy()
+ood_num_examples = len(test_data) // 5  # 5w/5=1w
+# expected_ap = ood_num_examples / (ood_num_examples + len(test_data))
 
 
-
+# ----------------------- 3. cal ID or OOD detect score ---------------------- #
 def get_ood_scores(loader, in_dist=False):
     _score = []
     _right_score = []
@@ -135,8 +121,6 @@ def get_ood_scores(loader, in_dist=False):
                 break
 
             data = data.cuda()
-
-            # output,_,feature = net(data)
             output = net(data)
             smax = to_np(F.softmax(output, dim=1))
 
@@ -144,7 +128,6 @@ def get_ood_scores(loader, in_dist=False):
                 _score.append(to_np((output.mean(1) - torch.logsumexp(output, dim=1))))
             else:
                 if args.score == 'energy':
-                    # breakpoint()
                     _score.append(-to_np(
                             (args.T * torch.logsumexp(output / args.T, dim=1))))
                 else:  # original MSP and Mahalanobis (but Mahalanobis won't need this returned)
@@ -169,24 +152,24 @@ def get_ood_scores(loader, in_dist=False):
         return concat(_score)[:ood_num_examples].copy()
 
 
+# ---------------------- 4. cal imagenet-100 val metrics --------------------- #
 if args.score == 'Odin':
     # separated because no grad is not applied
     in_score, right_score, wrong_score = lib.get_ood_scores_odin(test_loader, net, args.test_bs, ood_num_examples,
                                                                  args.T, args.noise, in_dist=True)
 elif args.score == 'M':
-    from torch.autograd import Variable
-
     _, right_score, wrong_score = get_ood_scores(test_loader, in_dist=True)
-
 
     train_data = \
         torchvision.datasets.ImageFolder(
-            os.path.join('/nobackup-slow/dataset/my_xfdu/IN100_new/', 'train'),
+            os.path.join('/root/datasets/ood/imagenet-benchmark/imagenet-100', 'train'),
             trn.Compose([
                 trn.Resize(256),
                 trn.CenterCrop(224),
                 trn.ToTensor(),
-                normalize,
+                trn.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]),
             ]))
 
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.test_bs, shuffle=False,
@@ -217,18 +200,13 @@ num_wrong = len(wrong_score)
 print('Error Rate {:.2f}'.format(100 * num_wrong / (num_wrong + num_right)))
 
 # /////////////// End Detection Prelims ///////////////
-
 print('\nUsing CIFAR-10 as typical data') if num_classes == 10 else print('\nUsing IN-100 as typical data')
-
 # /////////////// Error Detection ///////////////
-
 print('\n\nError Detection')
 show_performance(wrong_score, right_score, method_name=args.method_name)
 
-# /////////////// OOD Detection ///////////////
-auroc_list, aupr_list, fpr_list = [], [], []
 
-
+# ---------------------------- 5. cal ood metrics ---------------------------- #
 def get_and_print_results(ood_loader, num_to_avg=args.num_to_avg, ood_name=None):
     aurocs, auprs, fprs = [], [], []
 
@@ -238,23 +216,23 @@ def get_and_print_results(ood_loader, num_to_avg=args.num_to_avg, ood_name=None)
         elif args.score == 'M':
             out_score = lib.get_Mahalanobis_score(net, ood_loader, num_classes, sample_mean, precision, count - 1,
                                                   args.noise, num_batches)
-        else:
+        else:  # true energy
             out_score = get_ood_scores(ood_loader)
 
+        # mix ID and current OOD dataset
         if args.out_as_pos:  # OE's defines out samples as positive
             measures = get_measures(out_score, in_score)
         else:
             measures = get_measures(-in_score, -out_score)
-        # breakpoint()
-        aurocs.append(measures[0]);
-        auprs.append(measures[1]);
+        aurocs.append(measures[0])
+        auprs.append(measures[1])
         fprs.append(measures[2])
     print(in_score[:3], out_score[:3])
-    auroc = np.mean(aurocs);
-    aupr = np.mean(auprs);
+    auroc = np.mean(aurocs)
+    aupr = np.mean(auprs)
     fpr = np.mean(fprs)
-    auroc_list.append(auroc);
-    aupr_list.append(aupr);
+    auroc_list.append(auroc)
+    aupr_list.append(aupr)
     fpr_list.append(fpr)
 
     if num_to_avg >= 5:
@@ -263,9 +241,10 @@ def get_and_print_results(ood_loader, num_to_avg=args.num_to_avg, ood_name=None)
         print_measures(auroc, aupr, fpr, args.method_name)
 
 
+# ----------------------- 6. load ood dataset and test ----------------------- #
 # /////////////// inat ///////////////
 ood_loader = torch.utils.data.DataLoader(
-                torchvision.datasets.ImageFolder("/nobackup-slow/dataset/ImageNet_OOD_dataset/iNaturalist",
+                torchvision.datasets.ImageFolder("/root/datasets/ood/imagenet-benchmark/iNaturalist",
                                                  transform=trn.Compose([
     trn.Resize(256),
     trn.CenterCrop(224),
@@ -278,9 +257,8 @@ ood_loader = torch.utils.data.DataLoader(
 print('\n\ninat')
 get_and_print_results(ood_loader, ood_name='inat')
 
-
 # /////////////// Places365 ///////////////
-ood_data = dset.ImageFolder(root="/nobackup-slow/dataset/ImageNet_OOD_dataset/Places/",
+ood_data = dset.ImageFolder(root="/root/datasets/ood/imagenet-benchmark/Places/",
                             transform=trn.Compose([
     trn.Resize(256),
     trn.CenterCrop(224),
@@ -294,7 +272,7 @@ print('\n\nPlaces365 Detection')
 get_and_print_results(ood_loader, ood_name='place')
 
 # /////////////// sun ///////////////
-ood_data = dset.ImageFolder(root="/nobackup-slow/dataset/ImageNet_OOD_dataset/SUN/",
+ood_data = dset.ImageFolder(root="/root/datasets/ood/imagenet-benchmark/SUN/",
                             transform=trn.Compose([
     trn.Resize(256),
     trn.CenterCrop(224),
@@ -307,9 +285,8 @@ ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuf
 print('\n\nSUN Detection')
 get_and_print_results(ood_loader, ood_name='sun')
 
-
 # /////////////// texture ///////////////
-ood_data = dset.ImageFolder(root="/nobackup-slow/dataset/ImageNet_OOD_dataset/Textures/",
+ood_data = dset.ImageFolder(root="/root/datasets/ood/imagenet-benchmark/Textures/dtd/images/",
                             transform=trn.Compose([
     trn.Resize(256),
     trn.CenterCrop(224),
@@ -323,8 +300,5 @@ print('\n\ntexture Detection')
 get_and_print_results(ood_loader, ood_name='text')
 
 # /////////////// Mean Results ///////////////
-
 print('\n\nMean Test Results!!!!!')
 print_measures(np.mean(auroc_list), np.mean(aupr_list), np.mean(fpr_list), method_name=args.method_name)
-
-
