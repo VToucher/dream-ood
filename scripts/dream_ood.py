@@ -1,7 +1,9 @@
 import argparse, os, sys, glob
 import cv2
-import torch
 import numpy as np
+import random
+import time
+import torch
 from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm, trange
@@ -9,7 +11,6 @@ from imwatermark import WatermarkEncoder
 from itertools import islice
 from einops import rearrange
 from torchvision.utils import make_grid
-import time
 from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import contextmanager, nullcontext
@@ -175,7 +176,6 @@ def get_class_names(opt):
 
 
 def get_prompt(opt):
-    import random
     chozen_class = random.choice(get_class_names(opt))
     if chozen_class[0] in ['a', 'e', 'i', 'o', 'u']:
         return 'A high-quality image of the ' + chozen_class, chozen_class
@@ -419,8 +419,8 @@ def main():
 
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
-    if not opt.from_file:
-        prompt = opt.prompt
+    if not opt.from_file:  # true
+        prompt = opt.prompt  # default="a painting of a virus monster playing guitar"
         assert prompt is not None
         data = [batch_size * [prompt]]
 
@@ -436,7 +436,7 @@ def main():
     grid_count = len(os.listdir(outpath)) - 1
 
     start_code = None
-    if opt.fixed_code:
+    if opt.fixed_code:  # false
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
 
     precision_scope = autocast if opt.precision=="autocast" else nullcontext
@@ -448,7 +448,7 @@ def main():
                 for n in trange(opt.n_iter, desc="Sampling"):
                     for prompts in tqdm(data, desc="data"):
                         uc = None
-                        if opt.scale != 1.0:
+                        if opt.scale != 1.0:  # true 7.5
                             uc = model.get_learned_conditioning(batch_size * [""], 0, opt)
                         if isinstance(prompts, tuple):
                             prompts = list(prompts)

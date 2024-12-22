@@ -219,7 +219,7 @@ def get_and_print_results(ood_loader, num_to_avg=args.num_to_avg, ood_name=None)
         else:  # true energy
             out_score = get_ood_scores(ood_loader)
 
-        # mix ID and current OOD dataset
+        # NOTE: mix ID and current OOD dataset
         if args.out_as_pos:  # OE's defines out samples as positive
             measures = get_measures(out_score, in_score)
         else:

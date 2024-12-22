@@ -1,25 +1,22 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import os
-
 import argparse
 import time
 import torch
-
 import torchvision
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as trn
 import torchvision.datasets as dset
 import torch.nn.functional as F
-
-
-
-
-
-
+from tqdm import tqdm
 
 from utils.validation_dataset import validation_split
 from utils.out_dataset import RandomImages50k
+from resnet import ResNet_Model
+cudnn.benchmark = True  # fire on all cylinders
+
+
 
 parser = argparse.ArgumentParser(description='Tunes a CIFAR Classifier with OE',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -68,7 +65,7 @@ parser.add_argument('--gan', type=int, default=0)
 parser.add_argument('--r50', type=int, default=0)
 parser.add_argument('--godin', type=int, default=0)
 parser.add_argument('--deepaugment', type=int, default=0)
-parser.add_argument('--gpu', type=int, default=0)
+# parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--apex', type=int, default=0)
 parser.add_argument('--additional_info', type=str, default='')
 parser.add_argument('--energy_weight', type=float, default=1)  # change this to 19.2 if you are using cifar-100.
@@ -84,15 +81,13 @@ parser.add_argument('--loss_weight', type=float, default=0.1)
 args = parser.parse_args()
 
 
-from resnet import ResNet_Model
-
-if args.apex:
-    # apex
-    from apex.parallel import DistributedDataParallel as DDP
-    from apex.fp16_utils import *
-    from apex import amp, optimizers
-    from apex.multi_tensor_apply import multi_tensor_applier
-    amp.register_float_function(torch, 'sigmoid')
+# if args.apex:  # false
+#     # apex
+#     from apex.parallel import DistributedDataParallel as DDP
+#     from apex.fp16_utils import *
+#     from apex import amp, optimizers
+#     from apex.multi_tensor_apply import multi_tensor_applier
+#     amp.register_float_function(torch, 'sigmoid')
 
 if args.score == 'OE':
     save_info = 'oe_tune'
@@ -102,7 +97,7 @@ elif args.score == 'energy':
 
 args.save = args.save + save_info
 if os.path.isdir(args.save) == False:
-    os.mkdir(args.save)
+    os.makedirs(args.save)
 state = {k: v for k, v in args._get_kwargs()}
 print(state)
 
@@ -118,12 +113,12 @@ train_transform = trn.Compose([trn.RandomHorizontalFlip(), trn.RandomCrop(32, pa
 test_transform = trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)])
 
 
-traindir = os.path.join('/nobackup-slow/dataset/my_xfdu/IN100_new/', 'train')
-valdir = os.path.join('/nobackup-slow/dataset/my_xfdu/IN100_new/', 'val')
+traindir = os.path.join('/root/datasets/ood/imagenet-benchmark/imagenet-100/', 'train')
+valdir = os.path.join('/root/datasets/ood/imagenet-benchmark/imagenet-100/', 'val')
 normalize = trn.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225])
 
-if args.augmix:
+if args.augmix:  # false
     train_data_in = torchvision.datasets.ImageFolder(
         traindir,
         trn.Compose([
@@ -134,7 +129,7 @@ if args.augmix:
             normalize,
         ])
         )
-else:
+else:  # true
     train_data_in = torchvision.datasets.ImageFolder(
         traindir,
         trn.Compose([
@@ -143,7 +138,7 @@ else:
             trn.ToTensor(),
             normalize,
         ]))
-if args.deepaugment:
+if args.deepaugment:  # false
     edsr_dataset = torchvision.datasets.ImageFolder(
         '/nobackup-fast/dataset/my_xfdu/deepaugment/imagenet-r/DeepAugment/EDSR/',
         trn.Compose([
@@ -162,6 +157,7 @@ if args.deepaugment:
             normalize,
         ]))
     train_data_in = torch.utils.data.ConcatDataset([train_data_in, edsr_dataset, cae_dataset])
+
 test_data = torchvision.datasets.ImageFolder(
     valdir,
     trn.Compose([
@@ -175,12 +171,13 @@ num_classes = 100
 
 calib_indicator = ''
 if args.calibration:
+    # hold out some data for validation from train data(imagenet100-train)
     train_data_in, val_data = validation_split(train_data_in, val_share=0.1)
     calib_indicator = '_calib'
 
 
 
-ood_data = dset.ImageFolder(root="/nobackup-fast/dataset/my_xfdu/sd/txt2img-samples-in100/"  + args.my_info + '/samples',
+ood_data = dset.ImageFolder(root=os.path.join("./saved_data/txt2img-samples-in100/", args.my_info, 'samples'),
                             transform=trn.Compose([trn.RandomResizedCrop(224),
 trn.RandomHorizontalFlip(),
 trn.ToTensor(),
@@ -206,7 +203,7 @@ test_loader = torch.utils.data.DataLoader(
 # Create model
 if args.r50:
     net = ResNet_Model(name='resnet50', num_classes=num_classes)
-else:
+else:  # true
     net = ResNet_Model(name='resnet34', num_classes=num_classes)
 
 
@@ -222,7 +219,7 @@ def recursion_change_bn(module):
 
 
 # Restore model
-model_found = False
+# model_found = False
 if args.load != '':
     pretrained_weights = torch.load(args.load)
     # breakpoint()
@@ -245,17 +242,14 @@ optimizer = torch.optim.SGD(
     state['learning_rate'], momentum=state['momentum'],
     weight_decay=state['decay'], nesterov=True)
 
-
-if args.ngpu > 1:
-    net.cuda()
-    if args.apex:
-        net, optimizer = amp.initialize(net, optimizer, opt_level="O1", loss_scale=1.0)
-    net = torch.nn.DataParallel(net, device_ids=list(range(args.ngpu)))
-
 if args.ngpu > 0:
+    net.cuda()
     torch.cuda.manual_seed(1)
 
-cudnn.benchmark = True  # fire on all cylinders
+if args.ngpu > 1:
+    # if args.apex:
+    #     net, optimizer = amp.initialize(net, optimizer, opt_level="O1", loss_scale=1.0)
+    net = torch.nn.DataParallel(net, device_ids=list(range(args.ngpu)))
 
 
 def cosine_annealing(step, total_steps, lr_max, lr_min):
@@ -287,8 +281,7 @@ def train_permute():
 
 
     batch_iterator = iter(train_loader_out)
-    for _, in_set in enumerate(train_loader_in):
-
+    for _, in_set in tqdm(enumerate(train_loader_in), desc='ID data'):
 
         try:
             out_set = next(batch_iterator)
@@ -314,10 +307,10 @@ def train_permute():
         optimizer.zero_grad()
 
         # cross-entropy from softmax distribution to uniform distribution
-        if args.add_class:
+        if args.add_class:  # false
             target = torch.cat([target, torch.ones(len(out_set[0])).cuda().long() * (num_classes - 1)], -1)
             loss = F.cross_entropy(x, target)
-        else:
+        else:  # true
             # breakpoint()
             loss = F.cross_entropy(x[binary_labels[permutation_idx].bool()], fake_target[permutation_idx][binary_labels[permutation_idx].bool()].long())
             Ec_out = torch.logsumexp(x[(1-binary_labels[permutation_idx]).bool()], dim=1) / args.T
@@ -342,6 +335,7 @@ def train_permute():
         loss_avg = loss_avg * 0.8 + float(loss) * 0.2
     print(scheduler.get_lr())
     print('loss energy is: ', loss_energy_avg)
+    print('loss avg is: ', loss_avg)
     state['train_loss'] = loss_avg
     state['train_energy_loss'] = loss_energy_avg
 
@@ -398,7 +392,7 @@ print('Beginning Training\n')
 
 # Main loop
 loss_min = 100
-for epoch in range(0, args.epochs):
+for epoch in tqdm(range(0, args.epochs), desc='epoch'):
     state['epoch'] = epoch
 
     begin_epoch = time.time()

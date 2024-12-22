@@ -507,7 +507,7 @@ class LatentDiffusion(DDPM):
             param.requires_grad = False
 
     def instantiate_cond_stage(self, config):
-        if not self.cond_stage_trainable:
+        if not self.cond_stage_trainable:  # true
             if config == "__is_first_stage__":
                 print("Using first stage also as cond stage.")
                 self.cond_stage_model = self.first_stage_model
@@ -515,7 +515,7 @@ class LatentDiffusion(DDPM):
                 print(f"Training {self.__class__.__name__} as an unconditional model.")
                 self.cond_stage_model = None
                 # self.be_unconditional = True
-            else:
+            else:  # true
                 model = instantiate_from_config(config)
                 self.cond_stage_model = model.eval()
                 self.cond_stage_model.train = disabled_train
@@ -549,10 +549,11 @@ class LatentDiffusion(DDPM):
         return self.scale_factor * z
 
     def get_learned_conditioning(self, c, class_index, opt):
-        if self.cond_stage_forward is None:
-            if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
+        if self.cond_stage_forward is None:  # true
+            if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):  # true FrozenCLIPEmbedder
                 c = self.cond_stage_model.encode(c, class_index, opt)
-                if isinstance(c, DiagonalGaussianDistribution):
+            # ---------------------------------------------------------------------------- #
+                if isinstance(c, DiagonalGaussianDistribution):  # false
                     c = c.mode()
             else:
                 c = self.cond_stage_model(c)
