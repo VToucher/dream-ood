@@ -139,8 +139,8 @@ class FrozenCLIPEmbedder(AbstractEncoder):
     """Uses the CLIP transformer encoder for text (from Hugging Face)"""
     def __init__(self, version="openai/clip-vit-large-patch14", device="cuda", max_length=77):
         super().__init__()
-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
-        self.transformer = CLIPTextModel.from_pretrained(version)
+        self.tokenizer = CLIPTokenizer.from_pretrained(version, local_files_only=True)
+        self.transformer = CLIPTextModel.from_pretrained(version, local_files_only=True)
         self.token_embedding = self.transformer.text_model.embeddings.token_embedding.weight
 
         self.new_dis = torch.distributions.MultivariateNormal(torch.zeros(768).cuda(), torch.eye(768).cuda())
@@ -283,8 +283,8 @@ class FrozenCLIPEmbedder(AbstractEncoder):
                    ]
             tmp_token = self.tokenizer([fine_labels[class_index]], truncation=True, max_length=self.max_length, return_length=True,
                                         return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
-            tokens = tmp_token["input_ids"].to(self.device)
-            original_embed = deepcopy(self.transformer.text_model.embeddings.token_embedding.weight[tokens[0][1]])
+            tokens = tmp_token["input_ids"].to(self.device)  # [1, 77]
+            original_embed = deepcopy(self.transformer.text_model.embeddings.token_embedding.weight[tokens[0][1]])  # [768] clip class emb
             original_id = tokens[0][1]
             print(self.transformer.text_model.embeddings.token_embedding.weight[original_id][:10])
             if False:
@@ -296,10 +296,10 @@ class FrozenCLIPEmbedder(AbstractEncoder):
                 self.transformer.text_model.embeddings.token_embedding.weight[original_id] = outlier.cuda()
         batch_encoding = self.tokenizer(text, truncation=True, max_length=self.max_length, return_length=True,
                                         return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
-        tokens = batch_encoding["input_ids"].to(self.device)
+        tokens = batch_encoding["input_ids"].to(self.device)  # [batch, 77]
         outputs = self.transformer(input_ids=tokens)
 
-        z = outputs.last_hidden_state
+        z = outputs.last_hidden_state  # [batch, 77, 768]
         # return to the intial embeddings for sampling next time.
         if text[0] != '':
             self.transformer.text_model.embeddings.token_embedding.weight[original_id] = original_embed
@@ -307,8 +307,9 @@ class FrozenCLIPEmbedder(AbstractEncoder):
 
     def encode(self, text, class_index, opt):
         self.id_data = opt.id_data
-        self.outlier_embedding = torch.from_numpy(
-                np.load(opt.loaded_embedding))
+        if not hasattr(self, 'outlier_embedding'):
+            self.outlier_embedding = torch.from_numpy(
+                    np.load(opt.loaded_embedding))
         return self(text, class_index)
 
 
